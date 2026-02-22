@@ -6,11 +6,11 @@ Small language model trained on short stories in the genres of romance and Gothi
 Offering a no-download one click online browser based inference through WebGPU at:
 https://daniel-chermetz.github.io/mini-llm-js-victorian-stories/
 
-The link above is the least demanding of compute resources, requiring only enough memory for 256 tokens, but additional options are available:
+The link above is to a version where the free infrence context length is set to 512 tokens, but additional options are available, with a light-weight version requiring only enough memory for 256 tokens, and on the other side of the spectrum, a 768-token and a 1024-token versions for the generation of longer stories, though entailing larger memory footprints.
 
-512-token context window:
+256-token context window:
 
-https://daniel-chermetz.github.io/mini-llm-js-victorian-stories/victorianIndex512.html
+https://daniel-chermetz.github.io/mini-llm-js-victorian-stories/victorianIndex256.html
 
 768-token context window:
 
