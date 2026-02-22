@@ -822,8 +822,8 @@
             <h2>Step 1: Load a Story</h2>
             <button id="random-story-btn">Select a Random Story</button>
             <div class="manual-story-input">
-                or enter a story number (0 - 2,700,000):
-                <input type="number" id="story-id-input" min="0" max="2700000">
+                or enter a story number (0 - 377,000):
+                <input type="number" id="story-id-input" min="0" max="377000">
                 <button id="load-story-btn">Load</button>
             </div>
         </div>
@@ -962,7 +962,7 @@
             ffnDimMultiplier: 4,
             numTransformers: 16,
         };
-        globalThis.SEQUENCE_LENGTH = 512;
+        globalThis.SEQUENCE_LENGTH = 256;
         globalThis.SHOW_MODEL_SELECTOR = false; // Set to true to show model selection modal on startup
         if (!globalThis.vocab) globalThis.vocab = null;
         if (!globalThis.tokenizedStories) globalThis.tokenizedStories = {};
@@ -2399,7 +2399,7 @@
         
         // Teacher Forced Mode: validate model predictions against actual next tokens
         async function runTeacherForcedInference(contextTokens, numContextTokens, SEQUENCE_LENGTH) {
-            // Pad to SEQUENCE_LENGTH tokens (e.g., 512)
+            // Pad to SEQUENCE_LENGTH tokens (e.g., 256)
             let inputTokens = [...contextTokens];
             if (inputTokens.length < SEQUENCE_LENGTH) {
                 const paddingNeeded = SEQUENCE_LENGTH - inputTokens.length;
@@ -2410,7 +2410,7 @@
             console.log(`Running teacher-forced inference with ${inputTokens.length} tokens`);
             
             // Run the model
-            lmNetwork.runQueryThroughModel(inputTokens, null);
+            lmNetwork.runQueryThroughModel(inputTokens);
 
             const logitScoresPostSoftmaxRowMajorFlat = await globalThis.readFloat32Buffer(lmNetwork, lmNetwork.logitScoresByInputTokenPostSoftmax.buffer, SEQUENCE_LENGTH * lmNetwork.vocabSize * 4);
             console.log(logitScoresPostSoftmaxRowMajorFlat);
@@ -2526,7 +2526,7 @@
             // Initialize working array with context tokens
             let currentTokens = [...contextTokens];
             
-            // Pad to SEQUENCE_LENGTH if needed (e.g., 512)
+            // Pad to SEQUENCE_LENGTH if needed (e.g., 256)
             if (currentTokens.length < SEQUENCE_LENGTH) {
                 const paddingNeeded = SEQUENCE_LENGTH - currentTokens.length;
                 const padding = Array(paddingNeeded).fill('?');
@@ -2541,8 +2541,8 @@
             generatedTokens = [];
             
             // Generate tokens iteratively until we reach SEQUENCE_LENGTH+1 total tokens
-            // rightEndIndex goes from numContextTokens-1 to SEQUENCE_LENGTH-1 (e.g., 511) inclusive
-            // This generates tokens at positions numContextTokens through SEQUENCE_LENGTH (e.g., 512), giving SEQUENCE_LENGTH+1 (e.g., 513) total tokens
+            // rightEndIndex goes from numContextTokens-1 to SEQUENCE_LENGTH-1 (e.g., 255) inclusive
+            // This generates tokens at positions numContextTokens through SEQUENCE_LENGTH (e.g., 256), giving SEQUENCE_LENGTH+1 (e.g., 257) total tokens
             const maxIterations = SEQUENCE_LENGTH - numRealTokensStart + 1;
             console.log(`Will generate up to ${maxIterations} tokens`);
             
@@ -2566,7 +2566,7 @@
                 // await new Promise(resolve => setTimeout(resolve, 200));
                 
                 // Run inference in free inference mode (teacherMode = false)
-                lmNetwork.runQueryThroughModel(currentTokens, null, false, rightEndIndex);
+                lmNetwork.runQueryThroughModel(currentTokens, false, rightEndIndex, iteration > 0);
                 
                 const rightEndPredictionsRowMajorFlat = await globalThis.readFloat32Buffer(lmNetwork, lmNetwork.rightEndIndexTokenSoftmaxPredictions.buffer, 2 * lmNetwork.vocabSize * 4);
 
@@ -3012,7 +3012,7 @@
                 // Rest 200ms before inference
                 // await new Promise(resolve => setTimeout(resolve, 200));
                 
-                lmNetwork.runQueryThroughModel(currentTokens, null, false, rightEndIndex);
+                lmNetwork.runQueryThroughModel(currentTokens, false, rightEndIndex, true);
 
                 // Run inference in free inference mode
                 const rightEndPredictionsRowMajorFlat = await globalThis.readFloat32Buffer(lmNetwork, lmNetwork.rightEndIndexTokenSoftmaxPredictions.buffer, 2 * lmNetwork.vocabSize * 4);
