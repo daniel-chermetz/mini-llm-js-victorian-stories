@@ -42,7 +42,6 @@ globalThis.initTransformerBuffers = function(ctx, dimensions, heads, L, ffnDimMu
 	ctx.preBuffers = {
 		rms3: makeBuf(dimL),
 		residual1: makeBuf(dimL),
-		silu: makeBuf(ffnL),
 		hadamard: makeBuf(ffnL),
 		residual2: makeBuf(dimL),
 	};
@@ -66,6 +65,7 @@ globalThis.initTransformerBuffers = function(ctx, dimensions, heads, L, ffnDimMu
 				ffn1a: makeBuf(ffnL),
 				ffn1b: makeBuf(ffnL),
 				ffn2: makeBuf(dimL),
+				silu: makeBuf(ffnL),
 		});
 	}
 };
@@ -758,18 +758,20 @@ globalThis.executeSilu = (ctx, inputBuffer, ffnDim, L, shaderCode, tIndex) => {
 		layout: ctx.executeSilu_pipeline.getBindGroupLayout(0),
 		entries: [
 			{ binding: 0, resource: { buffer: ctx.preBuffersByTransformer[tIndex].ffn1a } },
-			{ binding: 1, resource: { buffer: ctx.preBuffers.silu } },
+			{ binding: 1, resource: { buffer: ctx.rightEndIndexBuffer } },
+			{ binding: 2, resource: { buffer: ctx.firstIterationBuffer } },
+			{ binding: 3, resource: { buffer: ctx.preBuffersByTransformer[tIndex].silu } },
 		],
 	});
 
 	passEncoder.setPipeline(ctx.executeSilu_pipeline);
 	passEncoder.setBindGroup(0, bindGroup);
 	
-	const workgroupsX = Math.ceil(globalThis.LSequence / 8);
+	const workgroupsX = Math.ceil(globalThis.postFirstIteration ? 1 : globalThis.LSequence / 8);
 	const workgroupsY = Math.ceil(ffnDim / 8);
 	passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
 
-	return { buffer: ctx.preBuffers.silu };
+	return { buffer: ctx.preBuffersByTransformer[tIndex].silu };
 };
 
 // TODO: clean signature, some params not longer needed
@@ -786,7 +788,7 @@ globalThis.executeHadamard = (ctx, aBuffer, bBuffer, ffnDim, L, shaderCode, tInd
 	const bindGroup = ctx.webgpuDevice.createBindGroup({
 		layout: ctx.executeHadamard_pipeline.getBindGroupLayout(0),
 		entries: [
-			{ binding: 0, resource: { buffer: ctx.preBuffers.silu } },
+			{ binding: 0, resource: { buffer: ctx.preBuffersByTransformer[tIndex].silu } },
 			{ binding: 1, resource: { buffer: ctx.preBuffersByTransformer[tIndex].ffn1b } },
 			{ binding: 2, resource: { buffer: ctx.preBuffers.hadamard } },
 		],

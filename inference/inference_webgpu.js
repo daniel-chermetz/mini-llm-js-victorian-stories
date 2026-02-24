@@ -771,11 +771,19 @@ globalThis.LmNetwork = function () {
 			
 			const shaderCode = `
 				@group(0) @binding(0) var<storage, read> input: array<f32>;
-				@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+				@group(0) @binding(1) var<storage, read> rightEndIndexArr: array<u32>;
+				@group(0) @binding(2) var<storage, read> isFirstIterArr: array<u32>;
+				@group(0) @binding(3) var<storage, read_write> output: array<f32>;
 				
 				@compute @workgroup_size(8, 8)
 				fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-					let col = global_id.x;
+					var col = global_id.x; // L
+					if (isFirstIterArr[0] == 0u) {
+						if (col != 0u) {
+							return;
+						}
+						col = rightEndIndexArr[0];
+					}
 					let row = global_id.y;
 					let L = ${L}u;
 					let ffnDim = ${ffnDim}u;
