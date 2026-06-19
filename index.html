@@ -11,6 +11,7 @@
     <script src="./inference/inference_webgpu.js"></script>
     <script src="./inference/inference_helper_webgpu.js"></script>
     <script src="./inference/inference_bpe.js"></script>
+    <script src="./inference/inference_bpe_tokenize_text.js"></script>
 
     <style>
         /* --- Basic Setup & Typography --- */
@@ -828,7 +829,7 @@
         </div>
 
         <!-- New: Write Story from Scratch -->
-        <div class="write-story-section" style="margin-top: 25px; text-align: center; font-size: 0.95em; color: var(--text-muted); display: none !important;">
+        <div class="write-story-section" style="margin-top: 25px; text-align: center; font-size: 0.95em; color: var(--text-muted);">
             <button id="write-story-btn" style="padding: 12px 24px; font-size: 0.95em; font-weight: 600; border: 2px solid var(--border-color); background-color: white; cursor: pointer; border-radius: 10px; transition: all 0.2s ease; box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);">Or enter your own story text...</button>
         </div>
         
@@ -838,7 +839,7 @@
                 <h2 style="margin-top: 0; text-align: center; color: var(--text-color);">Enter Your Story Text</h2>
                 <textarea id="custom-story-textarea" placeholder="Type or paste your story text here..." style="width: 100%; min-height: 200px; padding: 15px; border-radius: 10px; border: 2px solid var(--border-color); font-family: var(--font-family); font-size: 1em; box-sizing: border-box; resize: vertical;"></textarea>
                 <p id="custom-story-warning" style="color: #ef4444; font-size: 0.9em; margin: 10px 0; display: none;"></p>
-                <p style="color: var(--text-muted); font-size: 0.85em; margin: 10px 0;">Note: Characters not in the vocabulary will be replaced with spaces.</p>
+                <p style="color: var(--text-muted); font-size: 0.85em; margin: 10px 0;">Note: Characters not in the vocabulary will be replaced with '~'.</p>
                 <div style="display: flex; justify-content: flex-end; gap: 15px; margin-top: 20px;">
                     <button id="custom-story-cancel" style="padding: 12px 24px; font-size: 1em; font-weight: 600; border: 2px solid var(--border-color); background-color: white; cursor: pointer; border-radius: 10px;">Cancel</button>
                     <button id="custom-story-submit" style="padding: 12px 24px; font-size: 1em; font-weight: 600; border: none; background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%); color: white; cursor: pointer; border-radius: 10px;">Use This Text</button>
@@ -905,8 +906,10 @@
                     </div>
                 </div>
 
-                <h3>Story Context: <span id="story-id-display" style="font-size: 0.75em; font-weight: 400; color: var(--text-muted); font-family: var(--font-mono);"></span></h3>
-                <div id="story-context-display" contenteditable="false">Please load a story to begin...</div>
+                <div id="story-context-panel">
+                    <h3>Story Context: <span id="story-id-display" style="font-size: 0.75em; font-weight: 400; color: var(--text-muted); font-family: var(--font-mono);"></span></h3>
+                    <div id="story-context-display" contenteditable="false">Please load a story to begin...</div>
+                </div>
                 
                 <div style="display: flex; justify-content: flex-end; align-items: center; margin-top: 15px;">
                     <button id="generate-btn">Generate</button>
@@ -940,6 +943,7 @@
             percentage: 100
         };
         let isFromScratch = false; // Track if user came from "from scratch" path
+        let isCustomText = false; // Track if the current content came from user-entered custom text
         let generatedTokens = []; // Store tokens with their prediction data
         let activeTooltip = null; // Track the currently open tooltip
         let tooltipHideTimeout = null; // Track the hide delay tooltip
@@ -963,6 +967,7 @@
         };
         globalThis.SEQUENCE_LENGTH = 512;
         globalThis.SHOW_MODEL_SELECTOR = false; // Set to true to show model selection modal on startup
+        globalThis.SHOW_STORY_CONTEXT_PANEL = false; // Set to true to show the original "Story Context" panel (debug). When false, only the model output / generate panel is shown to avoid confusing the original story with the generated one.
         if (!globalThis.vocab) globalThis.vocab = null;
         if (!globalThis.tokenizedStories) globalThis.tokenizedStories = {};
         if (!globalThis.tokenEmbeddings_GLOBAL) globalThis.tokenEmbeddings_GLOBAL = null;
@@ -994,6 +999,12 @@
         const $outputArea = $('#output-area');
         const $loader = $('#loader');
         const $resetFlowBtn = $('#reset-flow-btn');
+
+        // Hide the original "Story Context" panel unless the debug flag is enabled.
+        // The story context text remains in the DOM so generation still reads it correctly.
+        if (!globalThis.SHOW_STORY_CONTEXT_PANEL) {
+            $('#story-context-panel').hide();
+        }
 
         const $writeStoryBtn = $('#write-story-btn');
         
@@ -2009,7 +2020,9 @@
                 $storyContextDisplay.text(contextText);
             }
 
-            $outputArea.text("The model's response will appear here.");
+            // Preview the story-so-far (the context fed to the model) in the output
+            // area before generation. The original "Story Context" panel stays hidden.
+            $outputArea.text(contextText && contextText.length ? contextText : "The model's response will appear here.");
             
             // Configure UI based on whether user came from "from scratch"
             if (isFromScratch) {
@@ -2065,6 +2078,7 @@
                 fullStoryText = storyText;
                 currentStoryId = storyId; // Store the story ID
                 isFromScratch = false; // User loaded a story
+                isCustomText = false; // Loaded story, not custom text
 
                 // Transition to the next step
                 $storySection.addClass('hidden');
@@ -2124,25 +2138,31 @@
             return { sanitizedText, replacedChars };
         }
         
-        // Process custom story text: validate, sanitize, and tokenize
-        function processCustomStoryText(text) {            
-            // Sanitize the text (replace non-vocab chars with spaces)
-            const { sanitizedText, replacedChars } = sanitizeTextForVocab(text);
-            
+        // Process custom story text: tokenize via the custom-text pipeline.
+        // Returns an array of token strings (all valid model-vocabulary entries;
+        // characters not in the vocabulary are replaced with '~').
+        async function processCustomStoryText(text) {
+            // Detect characters not in the vocabulary so we can warn the user.
+            // These will be represented as '~' tokens by the tokenizer.
+            const { replacedChars } = sanitizeTextForVocab(text);
             if (replacedChars.length > 0) {
-                console.log('Replaced non-vocab characters:', replacedChars);
+                console.log('Characters not in vocabulary (replaced with "~"):', replacedChars);
             }
-            
-            // Tokenize using BPE
-            const tokens = globalThis.bpeTextSequence(sanitizedText);
+
+            // Tokenize using the new custom-text tokenization pipeline:
+            // divideTextIntoWords -> tokenizeText (BPE merges) -> validate against vocab.
+            const tokens = await globalThis.tokenizeCustomText(text);
             console.log('Tokenized text into', tokens.length, 'tokens');
-            
+
+            // Reconstruct the post-tokenization text for display.
+            const sanitizedText = tokens.join('');
+
             // Truncate to SEQUENCE_LENGTH if necessary
             const truncatedTokens = tokens.slice(0, SEQUENCE_LENGTH);
             if (tokens.length > SEQUENCE_LENGTH) {
                 console.log(`Truncated from ${tokens.length} to ${SEQUENCE_LENGTH} tokens`);
             }
-            
+
             return { sanitizedText, tokens: truncatedTokens, replacedChars };
         }
         
@@ -2171,7 +2191,7 @@
             await loadVocab();
             
             // Process the text
-            const { sanitizedText, tokens, replacedChars } = processCustomStoryText(rawText);
+            const { sanitizedText, tokens, replacedChars } = await processCustomStoryText(rawText);
             
             // Show warning if characters were replaced
             if (replacedChars.length > 0) {
@@ -2189,6 +2209,7 @@
             fullStoryTokens = tokens;
             fullStoryText = sanitizedText;
             isFromScratch = false; // Not "from scratch" anymore - we have tokenized content
+            isCustomText = true; // Content came from user-entered custom text
             
             console.log('Custom story processed:', tokens.length, 'tokens');
             
@@ -2217,6 +2238,13 @@
         });
 
         $freeInferenceBtn.on('click', function() {
+            // For user-entered custom text, the whole text is the context to continue,
+            // so skip percentage selection and use 100%.
+            if (isCustomText) {
+                currentInferenceConfig = { type: 'free-inference', percentage: 100 };
+                setupInferenceUI();
+                return;
+            }
             $percentageSelector.removeClass('hidden');
         });
 
@@ -3073,6 +3101,7 @@
             fullStoryTokens = [];
             currentStoryId = null;
             isFromScratch = false;
+            isCustomText = false;
             
             // Clear generation state
             generatedTokens = [];
@@ -3098,6 +3127,7 @@
             `).removeClass('hidden');
             
             // $('.write-story-section').removeClass('hidden'); // Hidden until BPE script is updated
+            $('.write-story-section').removeClass('hidden');
             
             $configSection.removeClass('hidden');
 
