@@ -60,8 +60,15 @@ globalThis.initTransformerBuffers = function(ctx, dimensions, heads, L, ffnDimMu
 				outputProj: makeBuf(dimL),
 				colMax: makeBuf(headL),
 				colSum: makeBuf(headL),
+				qkRmsK: makeBuf(headL),
+				qkRmsQ: makeBuf(headL),
+				qkNormedK: makeBuf(dimL),
+				qkNormedQ: makeBuf(dimL),
 				softmax: makeBuf(headLL),
 				valsAttention: makeBuf(dimL),
+				gatedQueries: makeBuf(dimL),
+				gatedQueriesSigmoid: makeBuf(dimL),
+				queryGatedAttn: makeBuf(dimL),
 				ffn1a: makeBuf(ffnL),
 				ffn1b: makeBuf(ffnL),
 				ffn2: makeBuf(dimL),
@@ -414,6 +421,71 @@ globalThis.executeRMSNorm = function(ctx, xInputsBuffer, rmsGammaBuffer, dimensi
 	passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
 
 	return { buffer: rmsOutputBuffer };
+};
+
+globalThis.executeColSumRMSNormByHead = function(ctx, xInputsBuffer, heads, L, shaderCode, outputBuffer) {
+	if (!ctx.executeColSumRMSNormByHead_pipeline) {
+		const shaderModule = ctx.webgpuDevice.createShaderModule({ code: shaderCode });
+
+		ctx.executeColSumRMSNormByHead_pipeline = ctx.webgpuDevice.createComputePipeline({
+			layout: 'auto',
+			compute: { module: shaderModule, entryPoint: 'main' },
+		});
+	}
+
+	const bindGroup = ctx.webgpuDevice.createBindGroup({
+		layout: ctx.executeColSumRMSNormByHead_pipeline.getBindGroupLayout(0),
+		entries: [
+			{ binding: 0, resource: { buffer: xInputsBuffer } },
+			{ binding: 1, resource: { buffer: ctx.rightEndIndexBuffer } },
+			{ binding: 2, resource: { buffer: ctx.firstIterationBuffer } },
+			{ binding: 3, resource: { buffer: outputBuffer } },
+		],
+	});
+
+	passEncoder.setPipeline(ctx.executeColSumRMSNormByHead_pipeline);
+	passEncoder.setBindGroup(0, bindGroup);
+
+	// Shader is @workgroup_size(1, 8): x covers one column per workgroup, y covers 8 heads per workgroup.
+	const workgroupsX = globalThis.postFirstIteration ? 1 : globalThis.LSequence;
+	const workgroupsY = Math.ceil(heads / 8);
+	passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
+
+	return { buffer: outputBuffer };
+};
+
+globalThis.executeRMSNormByHead = function(ctx, xInputsBuffer, denominatorBuffer, rmsGammaBuffer, heads, headDim, L, shaderCode, outputBuffer) {
+	if (!ctx.executeRMSNormByHead_pipeline) {
+		const shaderModule = ctx.webgpuDevice.createShaderModule({ code: shaderCode });
+
+		ctx.executeRMSNormByHead_pipeline = ctx.webgpuDevice.createComputePipeline({
+			layout: 'auto',
+			compute: { module: shaderModule, entryPoint: 'main' },
+		});
+	}
+
+	const bindGroup = ctx.webgpuDevice.createBindGroup({
+		layout: ctx.executeRMSNormByHead_pipeline.getBindGroupLayout(0),
+		entries: [
+			{ binding: 0, resource: { buffer: xInputsBuffer } },
+			{ binding: 1, resource: { buffer: denominatorBuffer } },
+			{ binding: 2, resource: { buffer: rmsGammaBuffer } },
+			{ binding: 3, resource: { buffer: ctx.rightEndIndexBuffer } },
+			{ binding: 4, resource: { buffer: ctx.firstIterationBuffer } },
+			{ binding: 5, resource: { buffer: outputBuffer } },
+		],
+	});
+
+	passEncoder.setPipeline(ctx.executeRMSNormByHead_pipeline);
+	passEncoder.setBindGroup(0, bindGroup);
+
+	// Shader is @workgroup_size(1, 8, 8): x -> one column per workgroup, y -> 8 heads, z -> 8 head-dim rows.
+	const workgroupsX = globalThis.postFirstIteration ? 1 : globalThis.LSequence;
+	const workgroupsY = Math.ceil(heads / 8);
+	const workgroupsZ = Math.ceil(headDim / 8);
+	passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY, workgroupsZ);
+
+	return { buffer: outputBuffer };
 };
 
 globalThis.executeMatMul_dim_L_dim_dim = function(ctx, aBuffer, bBuffer, dimensions, L, shaderCode, outputBuffer) {
@@ -802,6 +874,65 @@ globalThis.executeHadamard = (ctx, aBuffer, bBuffer, ffnDim, L, shaderCode, tInd
 	passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
 
 	return { buffer: ctx.preBuffers.hadamard };
+};
+
+globalThis.executeSigmoid = (ctx, inputBuffer, dimensions, L, shaderCode, tIndex) => {
+	if (!ctx.executeSigmoid_pipeline) {
+		const shaderModule = ctx.webgpuDevice.createShaderModule({ code: shaderCode });
+
+		ctx.executeSigmoid_pipeline = ctx.webgpuDevice.createComputePipeline({
+			layout: 'auto',
+			compute: { module: shaderModule, entryPoint: 'main' },
+		});
+	}
+
+	const bindGroup = ctx.webgpuDevice.createBindGroup({
+		layout: ctx.executeSigmoid_pipeline.getBindGroupLayout(0),
+		entries: [
+			{ binding: 0, resource: { buffer: inputBuffer } },
+			{ binding: 1, resource: { buffer: ctx.rightEndIndexBuffer } },
+			{ binding: 2, resource: { buffer: ctx.firstIterationBuffer } },
+			{ binding: 3, resource: { buffer: ctx.preBuffersByTransformer[tIndex].gatedQueriesSigmoid } },
+		],
+	});
+
+	passEncoder.setPipeline(ctx.executeSigmoid_pipeline);
+	passEncoder.setBindGroup(0, bindGroup);
+
+	const workgroupsX = Math.ceil(globalThis.postFirstIteration ? 1 : globalThis.LSequence / 8);
+	const workgroupsY = Math.ceil(dimensions / 8);
+	passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
+
+	return { buffer: ctx.preBuffersByTransformer[tIndex].gatedQueriesSigmoid };
+};
+
+globalThis.executeQueryGatingHadamard = (ctx, aBuffer, bBuffer, dimensions, L, shaderCode, tIndex) => {
+	if (!ctx.executeQueryGatingHadamard_pipeline) {
+		const shaderModule = ctx.webgpuDevice.createShaderModule({ code: shaderCode });
+
+		ctx.executeQueryGatingHadamard_pipeline = ctx.webgpuDevice.createComputePipeline({
+			layout: 'auto',
+			compute: { module: shaderModule, entryPoint: 'main' },
+		});
+	}
+
+	const bindGroup = ctx.webgpuDevice.createBindGroup({
+		layout: ctx.executeQueryGatingHadamard_pipeline.getBindGroupLayout(0),
+		entries: [
+			{ binding: 0, resource: { buffer: aBuffer } },
+			{ binding: 1, resource: { buffer: bBuffer } },
+			{ binding: 2, resource: { buffer: ctx.preBuffersByTransformer[tIndex].queryGatedAttn } },
+		],
+	});
+
+	passEncoder.setPipeline(ctx.executeQueryGatingHadamard_pipeline);
+	passEncoder.setBindGroup(0, bindGroup);
+
+	const workgroupsX = Math.ceil(globalThis.LSequence / 8);
+	const workgroupsY = Math.ceil(dimensions / 8);
+	passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
+
+	return { buffer: ctx.preBuffersByTransformer[tIndex].queryGatedAttn };
 };
 
 // TODO: clean signature, some params not longer needed

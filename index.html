@@ -964,6 +964,8 @@
             ropeDenomBase: 10000,
             ffnDimMultiplier: 4,
             numTransformers: 16,
+            CONFIG_QK_RMS: false, // Enable per-head RMS normalization of queries/keys before attention
+            CONFIG_QUERY_GATING: false, // Enable Qwen-style query gating of the attention output
         };
         globalThis.SEQUENCE_LENGTH = 512;
         globalThis.SHOW_MODEL_SELECTOR = false; // Set to true to show model selection modal on startup

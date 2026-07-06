@@ -23,6 +23,18 @@ globalThis.Transformer = function(tIndex, L_param) {
 		this.queriesByHead = this.queries;
 	}
 
+	if (NetworkMeta.CONFIG_QK_RMS) {
+		this.QKRMSNormByHead = () => {
+		    const pre = lmNetwork.preBuffersByTransformer[tIndex];
+		    // 1) denominators per head/column
+		    lmNetwork.colSumRMSNormByHead_WEBGPU(this.keysByHead,    pre.qkRmsK);
+		    lmNetwork.colSumRMSNormByHead_WEBGPU(this.queriesByHead, pre.qkRmsQ);
+		    // 2) normalize + gamma into fresh buffers, and re-point keysByHead/queriesByHead
+		    this.keysByHead    = lmNetwork.RMSNormByHead_WEBGPU(this.keysByHead,    pre.qkRmsK, this.rmsGammaKeys,    pre.qkNormedK);
+		    this.queriesByHead = lmNetwork.RMSNormByHead_WEBGPU(this.queriesByHead, pre.qkRmsQ, this.rmsGammaQueries, pre.qkNormedQ);
+		};
+	}
+
 	this.applyRoPE = (keysOrQueriesByHead, ropeOutputBuffer) => {
 		if (!lmNetwork.precomputedTheta) {
 			const flatPrecomputedTheta = new Float32Array(headDim * L);
@@ -48,8 +60,20 @@ globalThis.Transformer = function(tIndex, L_param) {
 		this.valueScaledAttentionByHead = lmNetwork.matMulValsAttention_WEBGPU(tIndex);
 	}
 
+	if (NetworkMeta.CONFIG_QUERY_GATING) {
+		this.generateGatedQueries = () => {
+			this.gatedQueries = lmNetwork.matMul_dim_L_dim_dim_WEBGPU(this.queryGateWeights, this.inputsPostRMS, lmNetwork.preBuffersByTransformer[tIndex].gatedQueries);
+		}
+		this.applySigmoidToGatedQueries = () => {
+			this.gatedQueriesPostSigmoid = lmNetwork.applySigmoid_WEBGPU(this.gatedQueries, tIndex);
+		}
+		this.applyQueryGatingHadamard = () => {
+			this.queryGatedValueScaledAttnByHead = lmNetwork.applyQueryGatingHadamard_WEBGPU(this.valueScaledAttentionByHead, this.gatedQueriesPostSigmoid, tIndex);
+		}
+	}
+
 	this.projectConcatAttentionToOutput = () => {
-		this.outputProjectedAttention = lmNetwork.matMul_dim_L_dim_dim_WEBGPU(this.outputProjectionWeights, this.valueScaledAttentionByHead, lmNetwork.preBuffersByTransformer[tIndex].outputProj);
+		this.outputProjectedAttention = lmNetwork.matMul_dim_L_dim_dim_WEBGPU(this.outputProjectionWeights, NetworkMeta.CONFIG_QUERY_GATING ? this.queryGatedValueScaledAttnByHead : this.valueScaledAttentionByHead, lmNetwork.preBuffersByTransformer[tIndex].outputProj);
 	}
 
 	this.addResidualInputsToConcatAttentionOutput = () => {
@@ -78,10 +102,21 @@ globalThis.Transformer = function(tIndex, L_param) {
 		this.generateKeys();
 		this.generateQueries();
 
+		if (NetworkMeta.CONFIG_QK_RMS) {
+			this.QKRMSNormByHead();
+		}
+
 		this.keysByHeadPostRoPE = this.applyRoPE(this.keysByHead, lmNetwork.preBuffersByTransformer[tIndex].ropeK);
 		this.queriesByHeadPostRoPE = this.applyRoPE(this.queriesByHead, lmNetwork.preBuffersByTransformer[tIndex].ropeQ);
 
 		this.getAttentionScoresByHead();
+
+		if (NetworkMeta.CONFIG_QUERY_GATING) {
+			this.generateGatedQueries();
+			this.applySigmoidToGatedQueries();
+			this.applyQueryGatingHadamard();
+		}
+
 		this.projectConcatAttentionToOutput();
 		this.addResidualInputsToConcatAttentionOutput();
 
@@ -357,6 +392,98 @@ globalThis.LmNetwork = function () {
 			};
 		}
 
+		if (NetworkMeta.CONFIG_QK_RMS && !this.colSumRMSNormByHead_WEBGPU) {
+			const shaderCode = `
+				@group(0) @binding(0) var<storage, read> xInputs: array<f32>;
+				@group(0) @binding(1) var<storage, read> rightEndIndexArr: array<u32>;
+				@group(0) @binding(2) var<storage, read> isFirstIterArr: array<u32>;
+				@group(0) @binding(3) var<storage, read_write> outputByCol: array<f32>;
+
+				@compute @workgroup_size(1, 8)
+				fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+					var col = global_id.x;
+					if (isFirstIterArr[0] == 0u) {
+						if (col != 0u) {
+							return;
+						}
+						col = rightEndIndexArr[0];
+					}
+					let headIndex = global_id.y;
+					if (headIndex >= ${heads}u) {
+						return;
+					}
+					let L = ${L}u;
+					let headDim = ${headDim}u;
+					let headOffset = headIndex * headDim * L;
+					let activeL = rightEndIndexArr[0] + 1u;
+
+					if (col < activeL) {
+						var colSquareSum: f32 = 0.0;
+						for (var rowIndex: u32 = 0u; rowIndex < headDim; rowIndex = rowIndex + 1u) {
+							let index = headOffset + rowIndex * L + col;
+							let val = xInputs[index];
+							colSquareSum = colSquareSum + (val * val);
+						}
+
+						let denominator = sqrt((colSquareSum / f32(headDim)) + 1e-8);
+						let colOffset = L * headIndex;
+						outputByCol[colOffset + col] = denominator;
+					}
+				}
+			`;
+
+			this.colSumRMSNormByHead_WEBGPU = function(xInputs, colSumRMSByHeadOutputBuffer) {
+				return executeColSumRMSNormByHead(this, xInputs.buffer, heads, L, shaderCode, colSumRMSByHeadOutputBuffer);
+			};
+		}
+
+		if (NetworkMeta.CONFIG_QK_RMS && !this.RMSNormByHead_WEBGPU) {
+			const shaderCode = `
+				@group(0) @binding(0) var<storage, read> xInputs: array<f32>;
+				@group(0) @binding(1) var<storage, read> denominator: array<f32>;
+				@group(0) @binding(2) var<storage, read> rmsGamma: array<f32>;
+				@group(0) @binding(3) var<storage, read> rightEndIndexArr: array<u32>;
+				@group(0) @binding(4) var<storage, read> isFirstIterArr: array<u32>;
+				@group(0) @binding(5) var<storage, read_write> output: array<f32>;
+
+				@compute @workgroup_size(1, 8, 8)
+				fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+					var col = global_id.x;
+					if (isFirstIterArr[0] == 0u) {
+						if (col != 0u) {
+							return;
+						}
+						col = rightEndIndexArr[0];
+					}
+					let headIndex = global_id.y;
+					if (headIndex >= ${heads}u) {
+						return;
+					}
+					let rowIndex = global_id.z;
+					if (rowIndex >= ${headDim}u) {
+						return;
+					}
+
+					let L = ${L}u;
+					let headDim = ${headDim}u;
+					let headOffset = headIndex * headDim * L;
+					let index = headOffset + rowIndex * L + col;
+					let denominatorIndex = headIndex * L + col;
+					let gammaIndex = headIndex * headDim + rowIndex;
+
+					let activeL = rightEndIndexArr[0] + 1u;
+					if (col < activeL) {
+						let normalized = xInputs[index] / denominator[denominatorIndex];
+						output[index] = normalized * rmsGamma[gammaIndex];
+					}
+				}
+			`;
+
+			this.RMSNormByHead_WEBGPU = function(xInputs, denominatorBuffer, rmsGamma, outputBuffer) {
+				return executeRMSNormByHead(this, xInputs.buffer, denominatorBuffer, rmsGamma.buffer, heads, headDim, L, shaderCode, outputBuffer);
+			};
+		}
+
 		if (!this.matMul_dim_L_dim_dim_WEBGPU) {
 			const shaderCode = `
 				@group(0) @binding(0) var<storage, read> a: array<f32>;
@@ -599,7 +726,7 @@ globalThis.LmNetwork = function () {
 			@group(0) @binding(1) var<storage, read> maxByCol: array<f32>;
 			@group(0) @binding(2) var<storage, read> sumByCol: array<f32>;
 			@group(0) @binding(3) var<storage, read> rightEndIndexArr: array<u32>;
-			@group(0) @binding(4) var<storage, read> isFirstIterArr: array<u32>;				
+			@group(0) @binding(4) var<storage, read> isFirstIterArr: array<u32>;
 			@group(0) @binding(5) var<storage, read_write> softmaxAttnScores: array<f32>;
 
 			@compute @workgroup_size(8, 8, 1)
@@ -692,6 +819,69 @@ globalThis.LmNetwork = function () {
 			};
 		}
 
+		if (NetworkMeta.CONFIG_QUERY_GATING && !this.applySigmoid_WEBGPU) {
+			const shaderCode = `
+				@group(0) @binding(0) var<storage, read> input: array<f32>;
+				@group(0) @binding(1) var<storage, read> rightEndIndexArr: array<u32>;
+				@group(0) @binding(2) var<storage, read> isFirstIterArr: array<u32>;
+				@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+
+				@compute @workgroup_size(8, 8)
+				fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+					var col = global_id.x; // L
+					if (isFirstIterArr[0] == 0u) {
+						if (col != 0u) {
+							return;
+						}
+						col = rightEndIndexArr[0];
+					}
+					let row = global_id.y;
+					let L = ${L}u;
+					let dim = ${dimensions}u;
+
+					if (col >= L || row >= dim) {
+						return;
+					}
+
+					let idx = row * L + col;
+					let x = input[idx];
+					// Sigmoid: 1 / (1 + exp(-x))
+					output[idx] = 1.0 / (1.0 + exp(-x));
+				}
+			`;
+
+			this.applySigmoid_WEBGPU = function(input, tIndex) {
+				return executeSigmoid(this, input.buffer, dimensions, L, shaderCode, tIndex);
+			};
+		}
+
+		if (!this.applyQueryGatingHadamard_WEBGPU) {
+			const shaderCode = `
+				@group(0) @binding(0) var<storage, read> left: array<f32>;
+				@group(0) @binding(1) var<storage, read> right: array<f32>;
+				@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+
+				@compute @workgroup_size(8, 8)
+				fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+					let col = global_id.x;
+					let row = global_id.y;
+					let L = ${L}u;
+					let dim = ${dimensions}u;
+
+					if (col >= L || row >= dim) {
+						return;
+					}
+
+					let idx = row * L + col;
+					output[idx] = left[idx] * right[idx];
+				}
+			`;
+
+			this.applyQueryGatingHadamard_WEBGPU = function(left, right, tIndex) {
+				return executeQueryGatingHadamard(this, left.buffer, right.buffer, dimensions, L, shaderCode, tIndex);
+			};
+		}
+
 		if (!this.elementWiseAdd_WEBGPU) {
 			const shaderCode = `
 				@group(0) @binding(0) var<storage, read> a: array<f32>;
@@ -774,7 +964,7 @@ globalThis.LmNetwork = function () {
 				@group(0) @binding(1) var<storage, read> rightEndIndexArr: array<u32>;
 				@group(0) @binding(2) var<storage, read> isFirstIterArr: array<u32>;
 				@group(0) @binding(3) var<storage, read_write> output: array<f32>;
-				
+
 				@compute @workgroup_size(8, 8)
 				fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 					var col = global_id.x; // L
@@ -1009,11 +1199,20 @@ globalThis.LmNetwork = function () {
 			this.transformers.push(new Transformer(tIndex, L));
 			
 			this.transformers[this.transformers.length - 1].queryWeights = this.load_dim_dim_weights_WEBGPU(GLOBAL_WEIGHTS[tIndex].queryWeights);
+			if (NetworkMeta.CONFIG_QUERY_GATING) {
+				this.transformers[this.transformers.length - 1].queryGateWeights = this.load_dim_dim_weights_WEBGPU(GLOBAL_WEIGHTS[tIndex].queryGateWeights);
+			}
+
 			this.transformers[this.transformers.length - 1].keyWeights = this.load_dim_dim_weights_WEBGPU(GLOBAL_WEIGHTS[tIndex].keyWeights);
 			this.transformers[this.transformers.length - 1].valueWeights = this.load_dim_dim_weights_WEBGPU(GLOBAL_WEIGHTS[tIndex].valueWeights);
 			
 			this.transformers[this.transformers.length - 1].rmsGamma = this.load_rms_weights_WEBGPU(GLOBAL_WEIGHTS[tIndex].rmsGamma);
 			this.transformers[this.transformers.length - 1].rmsGamma2 = this.load_rms_weights_WEBGPU(GLOBAL_WEIGHTS[tIndex].rmsGamma2);
+
+			if (NetworkMeta.CONFIG_QK_RMS) {
+				this.transformers[this.transformers.length - 1].rmsGammaKeys = this.load_rms_weights_WEBGPU(GLOBAL_WEIGHTS[tIndex].rmsGammaKeys);
+				this.transformers[this.transformers.length - 1].rmsGammaQueries = this.load_rms_weights_WEBGPU(GLOBAL_WEIGHTS[tIndex].rmsGammaQueries);
+			}
 			
 			this.transformers[this.transformers.length - 1].outputProjectionWeights = this.load_dim_dim_weights_WEBGPU(GLOBAL_WEIGHTS[tIndex].outputProjectionWeights);
 			
