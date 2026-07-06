@@ -132,14 +132,14 @@ globalThis.tokenizeCustomText = async (text) => {
 
 	// 2. Load and cache the BPE merge vocab.
 	if (!globalThis.bpeVocab) {
-		const bpeResponse = await fetch('./model/victorianBPEVocab.json');
+		const bpeResponse = await fetch(NetworkMeta.CONFIG_VOCAB_V2 ? './model/vocab/victorianBPEVocab_V2.json' : './model/vocab/victorianBPEVocab.json');
 		globalThis.bpeVocab = await bpeResponse.json();
 	}
 	const bpeVocab = globalThis.bpeVocab;
 
 	// Load and cache the model vocab (reusing globalThis.vocab if already loaded).
 	if (!globalThis.vocab) {
-		const vocabResponse = await fetch('./model/victorianVocab.json');
+		const vocabResponse = await fetch(NetworkMeta.CONFIG_VOCAB_V2 ? './model/vocab/victorianVocab_V2.json' : './model/vocab/victorianVocab.json');
 		globalThis.vocab = await vocabResponse.json();
 	}
 	const modelVocab = globalThis.vocab;

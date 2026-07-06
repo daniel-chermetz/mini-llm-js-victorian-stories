@@ -962,10 +962,16 @@
             dimensions: 768,
             heads: 4,
             ropeDenomBase: 10000,
-            ffnDimMultiplier: 4,
+            ffnDim: 3072,
+            // ffnDimMultiplier: 4, // deprecated
             numTransformers: 16,
+            CONFIG_QK_RMS: false, // Enable per-head RMS normalization of queries/keys before attention
+            CONFIG_QUERY_GATING: false, // Enable Qwen-style query gating of the attention output
+            CONFIG_VOCAB_V2: false, // Load victorianVocab_V2.json instead of victorianVocab.json
+            contextLength: 1024, // Sequence length / context window (drives SEQUENCE_LENGTH)
+            modelFile: 'victorian_weights_iter_75375.bin', // Weights file (appended to ./model/ and CDN base)
         };
-        globalThis.SEQUENCE_LENGTH = 1024;
+        globalThis.SEQUENCE_LENGTH = NetworkMeta.contextLength;
         globalThis.SHOW_MODEL_SELECTOR = false; // Set to true to show model selection modal on startup
         globalThis.SHOW_STORY_CONTEXT_PANEL = false; // Set to true to show the original "Story Context" panel (debug). When false, only the model output / generate panel is shown to avoid confusing the original story with the generated one.
         if (!globalThis.vocab) globalThis.vocab = null;
@@ -973,6 +979,25 @@
         if (!globalThis.tokenEmbeddings_GLOBAL) globalThis.tokenEmbeddings_GLOBAL = null;
         if (!globalThis.rmsGamma3_GLOBAL) globalThis.rmsGamma3_GLOBAL = null;
         if (!globalThis.GLOBAL_WEIGHTS) globalThis.GLOBAL_WEIGHTS = null;
+
+        // The CUDA trainer saves optional tensors (QK-RMS gammas, query-gate weights) under
+        // different names than the inference engine reads. Map save-file names -> inference
+        // property names, only when the tensor is present (optional configs may be off).
+        globalThis.remapOptionalBlockTensors = function(block) {
+            if (!block) return block;
+            const renameMap = {
+                queryRMSGamma: 'rmsGammaQueries',
+                keyRMSGamma: 'rmsGammaKeys',
+                gatedQueryWeights: 'queryGateWeights',
+            };
+            for (const savedName in renameMap) {
+                const expectedName = renameMap[savedName];
+                if (block[savedName] !== undefined && block[expectedName] === undefined) {
+                    block[expectedName] = block[savedName];
+                }
+            }
+            return block;
+        };
         
         let modelLoadingComplete = false;
 
@@ -1030,7 +1055,7 @@
             if (globalThis.vocab) return globalThis.vocab;
             
             try {
-                const response = await fetch('./model/victorianVocab.json');
+                const response = await fetch(NetworkMeta.CONFIG_VOCAB_V2 ? './model/vocab/victorianVocab_V2.json' : './model/vocab/victorianVocab.json');
                 globalThis.vocab = await response.json();
                 
                 // Check if it's an array or object
@@ -1364,6 +1389,7 @@
                         for (const tensorName in blockMeta) {
                             loadedBlock[tensorName] = readAndReshapeTensor(blockMeta[tensorName]);
                         }
+                        remapOptionalBlockTensors(loadedBlock);
                         return loadedBlock;
                     })
                 };
@@ -1619,6 +1645,7 @@
                     for (const tensorName in blockMeta) {
                         loadedBlock[tensorName] = readTensorColumnMajorToRowMajor(blockMeta[tensorName]);
                     }
+                    remapOptionalBlockTensors(loadedBlock);
                     return loadedBlock;
                 });
                 
@@ -1862,6 +1889,7 @@
                     for (const tensorName in blockMeta) {
                         loadedBlock[tensorName] = readerA.readTensorColumnMajorToRowMajor(blockMeta[tensorName]);
                     }
+                    remapOptionalBlockTensors(loadedBlock);
                     return loadedBlock;
                 });
                 
@@ -1874,6 +1902,7 @@
                     for (const tensorName in blockMeta) {
                         loadedBlock[tensorName] = readerB.readTensorColumnMajorToRowMajor(blockMeta[tensorName]);
                     }
+                    remapOptionalBlockTensors(loadedBlock);
                     return loadedBlock;
                 });
                 
@@ -3169,7 +3198,7 @@
                 $('#model-selector-modal').removeClass('hidden').css('display', 'flex');
             } else {
                 // Load default model weights asynchronously (don't await - let it load in background)
-                loadModelWeightsV2('./model/victorian_weights_iter_75375.bin', 'https://mini-llm-cuda.b-cdn.net/victorian_weights_iter_75375.bin').then(success => {
+                loadModelWeightsV2('./model/' + NetworkMeta.modelFile, 'https://mini-llm-cuda.b-cdn.net/' + NetworkMeta.modelFile).then(success => {
                     if (success) {
                         console.log('✓ Model weights ready');
                     } else {

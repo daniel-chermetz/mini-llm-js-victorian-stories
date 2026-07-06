@@ -199,7 +199,7 @@ globalThis.LmNetwork = function () {
 					let col = global_id.x;
 					let row = global_id.y;
 					let numCols = ${dimensions}u;
-					let numRows = ${dimensions * NetworkMeta.ffnDimMultiplier}u;
+					let numRows = ${NetworkMeta.ffnDim}u;
 					
 					if (col < numCols && row < numRows) {
 						let index = row * numCols + col;
@@ -209,7 +209,7 @@ globalThis.LmNetwork = function () {
 			`;
 
 			this.load_ffn1_weights_WEBGPU = function(weightMatrix) {
-				const numRows = dimensions * NetworkMeta.ffnDimMultiplier;
+				const numRows = NetworkMeta.ffnDim;
 				const numCols = dimensions;
 				
 				const flatInput = new Float32Array(numRows * numCols);
@@ -232,7 +232,7 @@ globalThis.LmNetwork = function () {
 				fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 					let col = global_id.x;
 					let row = global_id.y;
-					let numCols = ${dimensions * NetworkMeta.ffnDimMultiplier}u;
+					let numCols = ${NetworkMeta.ffnDim}u;
 					let numRows = ${dimensions}u;
 					
 					if (col < numCols && row < numRows) {
@@ -244,7 +244,7 @@ globalThis.LmNetwork = function () {
 
 			this.load_ffn2_weights_WEBGPU = function(weightMatrix) {
 				const numRows = dimensions;
-				const numCols = dimensions * NetworkMeta.ffnDimMultiplier;
+				const numCols = NetworkMeta.ffnDim;
 				
 				const flatInput = new Float32Array(numRows * numCols);
 				for (let row = 0; row < numRows; row++) {
@@ -911,7 +911,7 @@ globalThis.LmNetwork = function () {
 		}
 
 		if (!this.matMul_FFN1_WEBGPU) {
-			const ffnDim = dimensions * NetworkMeta.ffnDimMultiplier;
+			const ffnDim = NetworkMeta.ffnDim;
 
 			const shaderCode = `
 				@group(0) @binding(0) var<storage, read> weights: array<f32>;
@@ -957,7 +957,7 @@ globalThis.LmNetwork = function () {
 		}
 		
 		if (!this.applySilu_WEBGPU) {
-			const ffnDim = NetworkMeta.dimensions * NetworkMeta.ffnDimMultiplier;
+			const ffnDim = NetworkMeta.ffnDim;
 			
 			const shaderCode = `
 				@group(0) @binding(0) var<storage, read> input: array<f32>;
@@ -995,7 +995,7 @@ globalThis.LmNetwork = function () {
 		}
 
 		if (!this.applyHadamard_WEBGPU) {
-			const ffnDim = NetworkMeta.dimensions * NetworkMeta.ffnDimMultiplier;
+			const ffnDim = NetworkMeta.ffnDim;
 			
 			const shaderCode = `
 				@group(0) @binding(0) var<storage, read> left: array<f32>;
@@ -1024,7 +1024,7 @@ globalThis.LmNetwork = function () {
 		}
 
 		if (!this.matMul_FFN2_WEBGPU) {
-			const ffnDim = NetworkMeta.dimensions * NetworkMeta.ffnDimMultiplier;
+			const ffnDim = NetworkMeta.ffnDim;
 
 			const shaderCode = `
 				@group(0) @binding(0) var<storage, read> weights: array<f32>;
@@ -1244,7 +1244,7 @@ globalThis.LmNetwork = function () {
 		this.tokenEmbeddings = this.load_token_embeddings_WEBGPU(this.tokenEmbeddings);
 		this.rmsGamma3 = this.load_rms_weights_WEBGPU(rmsGamma3_GLOBAL);
 
-		globalThis.initTransformerBuffers(this, dimensions, heads, L, NetworkMeta.ffnDimMultiplier, NetworkMeta.numTransformers);
+		globalThis.initTransformerBuffers(this, dimensions, heads, L, NetworkMeta.ffnDim, NetworkMeta.numTransformers);
 	}
 
 	this.runQueryThroughModel = (queryArr, teacherMode = true, rightEndIndex = -1, postFirstIteration) => {

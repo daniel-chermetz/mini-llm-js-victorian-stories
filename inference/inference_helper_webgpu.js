@@ -26,12 +26,11 @@ globalThis.readFloat32Buffer = async function(ctx, srcBuffer, byteSize) {
   return result;
 }
 
-globalThis.initTransformerBuffers = function(ctx, dimensions, heads, L, ffnDimMultiplier, numTransformers) {
+globalThis.initTransformerBuffers = function(ctx, dimensions, heads, L, ffnDim, numTransformers) {
 	const F = Float32Array.BYTES_PER_ELEMENT;
 	const dimL = dimensions * L * F;
 	const headL = heads * L * F;
 	const headLL = heads * L * L * F;
-	const ffnDim = dimensions * ffnDimMultiplier;
 	const ffnL = ffnDim * L * F;
 
 	const makeBuf = (size) => ctx.webgpuDevice.createBuffer({
